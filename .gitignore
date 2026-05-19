@@ -1,0 +1,18 @@
+# 忽略 Python 虛擬環境資料夾 (這是造成過載的元凶)
+.venv/
+venv/
+env/
+
+# 忽略 Python 系統暫存檔
+__pycache__/
+*.pyc
+
+# 忽略我們自動生成的 Excel 報表資料夾
+每日新聞匯出/
+*.xlsx
+*.html
+
+# 忽略開發環境暫存檔
+.ipynb_checkpoints/
+
+.env
