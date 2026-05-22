@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from newspaper import Article, Config
 from google import genai
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # ================= 配置區域 =================
@@ -236,8 +237,6 @@ def ai_generate_bullets(title, df, fallback_items):
 
 def classify_news(title, media, keyword=""):
     text = f"{title} {media} {keyword}"
-    if "政大官網" in media or "政治大學" in media or "nccu" in text.lower():
-        return "政大官網", "課堂講座"
     if "政大" in text or "政治大學" in text or "UBA" in text:
         if "UBA" in text or "籃" in text or "體育" in text:
             return "政大", "體育"
@@ -253,7 +252,7 @@ def classify_news(title, media, keyword=""):
     return "高教", "其他"
 
 
-def generate_email_html_content(df, observation_items, social_items):
+def generate_email_html_content(df, observation_items):
     now = datetime.now()
     today_full = f"{now.year} 年 {now.month} 月 {now.day} 日"
     today_short = f"{now.month}/{now.day}"
@@ -276,7 +275,6 @@ def generate_email_html_content(df, observation_items, social_items):
 
     nccu_news = df[df["類別"] == "政大"]
     higher_edu = df[df["類別"] == "高教"]
-    nccu_official = df[df["類別"] == "政大官網"]
 
     html = f"""<html>
     <body style="font-family:'Microsoft JhengHei', Arial, sans-serif; color:#111; font-size:16px; line-height:1.7; margin:0; padding:32px 44px; background:#ffffff;">
@@ -295,12 +293,6 @@ def generate_email_html_content(df, observation_items, social_items):
     {news_list_html(nccu_news)}
     {section_bar("高教", "#f1f1f1")}
     {news_list_html(higher_edu)}
-    {section_bar("政大官網", "#fde9d9")}
-    {news_list_html(nccu_official)}
-    {section_bar("社群觀察", "#e2f0d9")}
-    <ul style="padding-left:22px; margin-top:14px;">
-        {''.join([f'<li>{item}</li>' for item in social_items])}
-    </ul>
     <h2 style="font-size:22px; margin-top:28px;">完整新聞列表</h2>
     <table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse; width:60%; min-width:900px; font-size:15px;">
         <tr style="background:#dbe7f3; text-align:center;">
@@ -320,12 +312,6 @@ def generate_email_html_content(df, observation_items, social_items):
         </tr>"""
 
     html += f"""
-        <tr>
-            <td>社群</td>
-            <td>整體觀察</td>
-            <td>{social_items[0]}</td>
-            <td>綜整</td>
-        </tr>
     </table>
     <hr style="margin-top:10px;">
     <p><strong>【校園簡介影片】</strong><br>政大校園簡介影片上線，歡迎點閱分享。<br>
@@ -359,7 +345,6 @@ keywords_input = st.sidebar.text_area(
     value='"政治大學","政大","NCCU","李蔡彥","高教","頂大"'
 )
 
-# 🚀 核心新需求：允許自由選擇要爬過去幾天的新聞
 days_to_fetch = st.sidebar.slider(
     "2. 選擇回溯天數 (連假時可自由調高)",
     min_value=1,
@@ -389,7 +374,6 @@ if st.sidebar.button("🚀 開始執行輿情爬取任務", use_container_width=
     with st.status("🛸 輿情系統執行中，請稍候...", expanded=True) as status:
         st.write("📋 初始化參數與時間視窗...")
         
-        # 設定時間參數
         current_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         max_seconds = 86400 * days_to_fetch
         time_param = f"{days_to_fetch}d"
@@ -416,9 +400,16 @@ if st.sidebar.button("🚀 開始執行輿情爬取任務", use_container_width=
             for idx, entry in enumerate(valid_entries):
                 progress_bar.progress((idx + 1) / len(valid_entries))
                 try:
+                    # 🚫 終極攔截點：從最源頭檢查媒體名稱與網址
+                    media_name = entry.source.title if hasattr(entry, "source") else ""
+                    if "nccu.edu.tw" in media_name.lower() or "nccu.edu.tw" in entry.link.lower():
+                        continue  # 直接跳過該筆新聞
+                        
                     pub_dt = datetime.strptime(entry.published, "%a, %d %b %Y %H:%M:%S GMT")
                     if (current_utc - pub_dt).total_seconds() <= max_seconds:
+                        
                         real_link = get_real_url(entry.link)
+                        
                         article = Article(real_link, language='zh', config=config)
                         article.download()
                         article.parse()
@@ -459,7 +450,7 @@ if st.sidebar.button("🚀 開始執行輿情爬取任務", use_container_width=
         if news_list:
             df = pd.DataFrame(news_list).drop_duplicates(subset=['連結']).reset_index(drop=True)
             
-            st.write("🤖 正在調用 Gemini 產出全局輿情觀察與社群分析簡報...")
+            st.write("🤖 正在調用 Gemini 產出全局輿情觀察簡報...")
             categories = df.apply(lambda r: classify_news(r.get("標題", ""), r.get("媒體", ""), r.get("來源關鍵字", "")), axis=1)
             df["類別"] = [c[0] for c in categories]
             df["主題"] = [c[1] for c in categories]
@@ -470,12 +461,6 @@ if st.sidebar.button("🚀 開始執行輿情爬取任務", use_container_width=
                 "整體新聞風向偏中性穩定。"
             ])
 
-            social_items = ai_generate_bullets("社群觀察", df, [
-                "今日未見政大相關公開社群重大負面延燒議題。",
-                "公開討論仍以校園日常、活動與賽事關注為主。",
-                "整體社群風向偏中性穩定。"
-            ])
-
             folder = "每日新聞匯出"
             os.makedirs(folder, exist_ok=True)
             file_time = datetime.now().strftime("%Y%m%d_%H%M")
@@ -483,7 +468,7 @@ if st.sidebar.button("🚀 開始執行輿情爬取任務", use_container_width=
             excel_path = f"{folder}/政大新聞_{file_time}.xlsx"
             df.to_excel(excel_path, index=False, engine='openpyxl')
             
-            html_content = generate_email_html_content(df, observation_items, social_items)
+            html_content = generate_email_html_content(df, observation_items)
             html_path = f"{folder}/政大輿情草稿_{file_time}.html"
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write(html_content)

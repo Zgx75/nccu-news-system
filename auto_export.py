@@ -85,30 +85,22 @@ def is_relevant_article(title, content, main_keywords=["政大", "政治大學",
     """
     新聞相關性過濾機制 (位置與詞頻雙重判定)
     """
-    # 1. 標題特權：如果標題直接命中關鍵字，通常是高度相關，直接放行
     if any(kw.lower() in title.lower() for kw in main_keywords):
         return True
         
-    # 如果內容為空，無法判斷，直接捨棄
     if not content:
         return False
 
-    # 2. 內文深度判定
     content_lower = content.lower()
     
-    # 條件 A：首段攔截 (檢查前 150 字內是否出現核心關鍵字)
-    # 新聞學的「倒金字塔結構」決定了重點必定在開頭。若前 150 字未提及，多為過場。
     first_150_chars = content_lower[:150]
     if any(kw.lower() in first_150_chars for kw in main_keywords):
         return True
         
-    # 條件 B：詞頻門檻 (整篇文章出現關鍵字總和達 3 次以上)
-    # 處理「深度報導」或「專訪」中，開頭在鋪陳，但後續大量討論政大的情況。
     keyword_count = sum(content_lower.count(kw.lower()) for kw in main_keywords)
-    if keyword_count >= 3: # 這裡的門檻值 (3) 您可以視後續爬取狀況進行微調
+    if keyword_count >= 3:
         return True
         
-    # 如果標題沒命中，且內文既不在開頭提及、出現次數又低於 3 次 -> 判定為雜訊
     return False
 
 def get_real_url(google_url):
@@ -156,6 +148,9 @@ def get_ai_summary(title, content_text):
     if not content_text or len(content_text) < 80:
         return "（內容不足，建議點擊連結閱讀全文）"
 
+    if not GEMINI_API_KEY:
+        return "（未配置 Gemini API Key，跳過摘要）"
+
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     for attempt in range(3):
@@ -180,7 +175,6 @@ def get_ai_summary(title, content_text):
 
             text = response.text.strip()
 
-            # ❗ 過濾垃圾輸出
             if any(x in text for x in ["我是", "分析官", "您提供", "無法摘要"]):
                 return "（內容不足，建議點擊連結閱讀全文）"
 
@@ -193,7 +187,7 @@ def get_ai_summary(title, content_text):
             if "503" in str(e):
                 time.sleep(3 * (attempt + 1))
             else:
-                return f"摘要失敗"
+                return "摘要失敗"
 
     return "（AI服務繁忙）"
 
@@ -219,44 +213,39 @@ def fetch_nccu_news(keywords_str, max_results=50):
 
         for entry in feed.entries[:max_results]:
             try:
+                # 🚫 終極攔截點：從最源頭檢查媒體名稱與網址
+                media_name = entry.source.title if hasattr(entry, "source") else ""
+                if "nccu.edu.tw" in media_name.lower() or "nccu.edu.tw" in entry.link.lower():
+                    continue  # 直接拋棄，連日期都不算、網頁也不抓
+                
                 pub_dt = datetime.strptime(entry.published, "%a, %d %b %Y %H:%M:%S GMT")
                 if (current_utc - pub_dt).total_seconds() <= max_seconds:
                     
                     real_link = get_real_url(entry.link)
+                    
                     article = Article(real_link, language='zh', config=config)
                     article.download()
                     article.parse()
                     real_pub_dt = extract_article_date(article)
 
-                    # 雙重時間驗證
                     if real_pub_dt is not None:
                         real_pub_dt = real_pub_dt.tz_localize(None) if hasattr(real_pub_dt, 'tzinfo') and real_pub_dt.tzinfo else real_pub_dt
-
                         if (current_utc - real_pub_dt).total_seconds() > max_seconds:
-                            continue # 直接跳過，不印出提示
-                            
+                            continue
                         final_dt = real_pub_dt
                     else:
                         final_dt = pub_dt
 
                     best_text = extract_best_content(article, entry.summary)
                     
-                    # 🌟 定義哪些搜尋關鍵字需要啟動「嚴格過濾」
                     nccu_core_targets = ["政治大學", "政大"]
-                    
-                    # 將當前搜尋的關鍵字 (kw) 轉小寫並去除引號，方便精準比對
                     clean_kw = kw.replace('"', '').strip().lower()
-                    
-                    # 判斷當前搜尋的關鍵字，是否屬於需要嚴格把關的「政大陣營」
                     needs_strict_filter = any(target in clean_kw for target in nccu_core_targets)
 
                     if needs_strict_filter:
-                        # 只有政大陣營的關鍵字，才需要送進 is_relevant_article 檢查詞頻與位置
                         if not is_relevant_article(entry.title, best_text):
-                            # print(f"    [過濾雜訊] 標題: {entry.title}") 
-                            continue # 未通過嚴格檢驗，捨棄此篇
+                            continue
 
-                    # 通過審查（或是根本不需要審查的廣泛關鍵字，如「高教」），繼續執行 AI 摘要
                     summary = get_ai_summary(entry.title, best_text)
 
                     news_list.append({
@@ -268,15 +257,18 @@ def fetch_nccu_news(keywords_str, max_results=50):
                         "摘要": summary
                     })
 
-                    time.sleep(1.5) # 遵守速率限制
+                    time.sleep(1.5)
             except:
                 continue
                 
     return pd.DataFrame(news_list).drop_duplicates(subset=['連結']).reset_index(drop=True)
 
 def ai_generate_bullets(title, df, fallback_items):
+    if not GEMINI_API_KEY or df.empty:
+        return fallback_items
+        
     news_text = "\n".join([
-        f"- 標題：{r.get('標題','')}｜媒體：{r.get('媒體','')}｜摘要：{r.get('AI智能摘要','')}"
+        f"- 標題：{r.get('標題','')}｜媒體：{r.get('媒體','')}｜摘要：{r.get('摘要','')}"
         for _, r in df.iterrows()
     ])
 
@@ -298,22 +290,30 @@ def ai_generate_bullets(title, df, fallback_items):
 
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt
-        )
-        text = response.text.strip()
-        lines = [line.strip("・-• 1234567890.、 ") for line in text.splitlines() if line.strip()]
-        return lines[:3] if lines else fallback_items
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash-lite",
+                    contents=prompt
+                )
+                text = response.text.strip()
+                lines = [line.strip("・-• 1234567890.、 ") for line in text.splitlines() if line.strip()]
+                if lines:
+                    return lines[:3]
+                break
+            except Exception as e:
+                if "503" in str(e):
+                    time.sleep(2 * (attempt + 1))
+                else:
+                    return fallback_items
     except Exception:
-        return fallback_items
+        pass
+    return fallback_items
 
 def classify_news(title, media, keyword=""):
     text = f"{title} {media} {keyword}"
 
-    if "政大官網" in media or "政治大學" in media or "nccu" in text.lower():
-        return "政大官網", "課堂講座"
-
+    # 清除官網判定邏輯
     if "政大" in text or "政治大學" in text or "UBA" in text:
         if "UBA" in text or "籃" in text or "體育" in text:
             return "政大", "體育"
@@ -361,16 +361,6 @@ def export_email_html(df, folder):
         ]
     )
 
-    social_items = ai_generate_bullets(
-        "社群觀察",
-        df,
-        [
-            "今日未見政大相關公開社群重大負面延燒議題。",
-            "公開討論仍以校園日常、活動與賽事關注為主。",
-            "整體社群風向偏中性穩定。"
-        ]
-    )
-
     def section_bar(title, bg="#dbe7f3"):
         return f"""
         <div style="background:{bg}; padding:10px 12px; margin-top:24px; font-weight:bold;">
@@ -397,7 +387,6 @@ def export_email_html(df, folder):
 
     nccu_news = df[df["類別"] == "政大"]
     higher_edu = df[df["類別"] == "高教"]
-    nccu_official = df[df["類別"] == "政大官網"]
 
     html = f"""
     <html>
@@ -442,14 +431,6 @@ def export_email_html(df, folder):
     {section_bar("高教", "#f1f1f1")}
     {news_list_html(higher_edu)}
 
-    {section_bar("政大官網", "#fde9d9")}
-    {news_list_html(nccu_official)}
-
-    {section_bar("社群觀察", "#e2f0d9")}
-    <ul style="padding-left:22px; margin-top:14px;">
-        {''.join([f'<li>{item}</li>' for item in social_items])}
-    </ul>
-
     <h2 style="font-size:22px; margin-top:28px;">完整新聞列表</h2>
 
     <table border="1" cellpadding="8" cellspacing="0" style="
@@ -481,12 +462,6 @@ def export_email_html(df, folder):
         """
 
     html += f"""
-        <tr>
-            <td>社群</td>
-            <td>整體觀察</td>
-            <td>{social_items[0]}</td>
-            <td>綜整</td>
-        </tr>
     </table>
 
     <hr style="margin-top:10px;">
