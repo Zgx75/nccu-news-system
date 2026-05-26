@@ -86,7 +86,7 @@ def extract_article_date(article_obj):
 
 
 def is_relevant_article(title, content, main_keywords=["政大", "政治大學", "NCCU"]):
-    """新聞相關性過濾機制 (位置與詞頻雙重判定)"""
+    """新聞相關性過濾機制（只要標題或內文任一處出現關鍵字即視為相關）"""
     if any(kw.lower() in title.lower() for kw in main_keywords):
         return True
         
@@ -94,16 +94,7 @@ def is_relevant_article(title, content, main_keywords=["政大", "政治大學",
         return False
 
     content_lower = content.lower()
-    
-    first_150_chars = content_lower[:150]
-    if any(kw.lower() in first_150_chars for kw in main_keywords):
-        return True
-        
-    keyword_count = sum(content_lower.count(kw.lower()) for kw in main_keywords)
-    if keyword_count >= 3:
-        return True
-        
-    return False
+    return any(kw.lower() in content_lower for kw in main_keywords)
 
 
 def get_real_url(google_url):
